@@ -1,0 +1,22 @@
+[Unit]
+Description=GPU 空闲自动省电守护程序 (vLLM idle power saver)
+Documentation=https://learn.microsoft.com/en-us/azure/virtual-machines/linux/nvidia-driver-azure-nvidia
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/gpu-idle-saver/gpu_idle_saver.py --config /opt/gpu-idle-saver/config.ini
+WorkingDirectory=/opt/gpu-idle-saver
+Restart=on-failure
+RestartSec=5
+# 退出信号：程序会捕捉 SIGTERM 并恢复忙态功耗
+KillSignal=SIGTERM
+TimeoutStopSec=60
+# 日志进 journalctl -u gpu-idle-saver
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
