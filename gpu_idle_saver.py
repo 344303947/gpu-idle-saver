@@ -59,6 +59,9 @@ class GPUIdleSaver:
         # 本机电源额定 1200W，预留 450W 给 CPU/其他部件，故 GPU 预算 750W。
         self.power_budget = cfg.getfloat("power", "power_budget", fallback=750.0)
         self.power_low = cfg.getfloat("power", "power_low", fallback=100.0)
+        # 每卡功耗硬上限(W)——安全风控：忙态分配/退出恢复等任何情况下，单卡功率
+        # 上限绝不允许超过此值(默认280W)；0 表示不设额外上限(沿用硬件 max)。
+        self.power_cap = cfg.getfloat("power", "power_cap", fallback=280.0)
         # 下发死区(W)：目标与当前生效值之差小于该值视为"微小调整"，受最短间隔抑制，
         # 防止 ±几瓦的反复抖动每 2s 刷一次 nvidia-smi -pl；重大变化(差>=死区)立即下发。
         self.deploy_deadband = cfg.getfloat("power", "deploy_deadband", fallback=10.0)
@@ -180,13 +183,19 @@ class GPUIdleSaver:
                 continue
             # 单卡物理上限：max_limit > default > 当前 > 保守预算
             master = max_l if max_l and max_l > 0 else (def_l if def_l and def_l > 0 else (cur_l if cur_l > 0 else self.budget_for(1)))
+            # 安全风控：物理上限再叠加每卡硬上限 power_cap，任何卡在忙态/恢复时
+            # 都绝不会被授权超过 280W
+            if self.power_cap and self.power_cap > 0 and master > self.power_cap:
+                master = self.power_cap
             low = self.power_low
             if low <= 0:
                 low = min_l if min_l and min_l > 0 else master * 0.5
             low = max(min_l or 0, min(low, master))
             self.gpu_info[idx] = {
                 "min": min_l or 0,
-                "max": max_l or 0,
+                # max 存"授权上限"＝min(硬件max, power_cap)：忙态动态分配(_build_targets
+                # 的 hi)与退出恢复(_restore_all 的 bound)都以此为界，任何单卡绝不超过 280W
+                "max": master,
                 "default": def_l or 0,
                 "current": cur_l or 0,
                 "low": low,
