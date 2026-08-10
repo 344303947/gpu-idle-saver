@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GPU 空闲自动省电守护程序 v0.3.1
+GPU 空闲自动省电守护程序 v0.3.2
 
 用途：vLLM 多卡推理机。空闲时降低每张卡功耗上限省电；忙时恢复性能。
 安全约束：整机 GPU 功耗硬上限 = power_budget(默认 750W，电源1200W 预留450W给CPU等)。任意时刻
@@ -9,10 +9,11 @@ GPU 空闲自动省电守护程序 v0.3.1
 实测功耗加权瓜分"预算−空闲占用"，天然保证总和 ≤ 预算，杜绝多卡同时拉满瞬时
 超载电源。绝不锁定频率，保证推理延迟不受影响。
 
-每卡独立状态机 + 动态智能功率分配：
+每卡独立状态机 + 动态功率分配：
   - 每张卡自己判定 忙/闲，双向去抖(慢进快出)
-  - 忙的卡按实测功耗加权分配 power_budget 内的剩余预算；空闲卡降功耗上限省电
+  - 忙的卡【均分】power_budget 内的剩余预算(适配 PP 流水线同质负载)；空闲卡降功耗上限省电
   - 整机硬约束：sum(power.limit) ≤ power_budget，任何配置/卡数下都成立
+  - 下发死区 + 最短间隔：±几瓦抖动不反复下发，重大变化立即响应
 
 运行：python3 gpu_idle_saver.py --config config.ini --dry-run
 """
@@ -29,7 +30,7 @@ import tempfile
 import time
 import fcntl
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 STATE_BUSY = "busy"
 STATE_IDLE = "idle"
@@ -327,8 +328,10 @@ class GPUIdleSaver:
 
     # ---------- 动态智能功率分配 ----------
     def _build_targets(self, samples):
-        """整机预算内动态分配：空闲卡固定 power_low；busy 卡按各自实测功耗
-        (power.draw) 加权瓜分"整机预算 − 空闲占用"，用得多得多的上限。
+        """整机预算内动态分配：空闲卡固定 power_low；忙卡【均分】"整机预算 − 空闲占用"。
+        适配 PP(流水线)推理：每卡同质负载、串联执行，瓶颈卡决定全链路吞吐，
+        用功耗加权的"按果配因"会喂饱饱饿饿、拖慢流水线；均分保证每卡上限一致。
+        超单卡物理上限的份额 clamp 到 hi，并把剩余预算再分给能接收的卡。
         数学上保证: 所有卡上限之和 ≤ power_budget(默认750W)，绝不超整机 GPU 预算。"""
         n = len(self.gpu_info)
         if n == 0:
@@ -344,23 +347,29 @@ class GPUIdleSaver:
             if self.gpu_state[idx] == STATE_IDLE:
                 targets[idx] = float(info["low"])
             else:
-                targets[idx] = float(info["low"])  # 占位，下面统一按权重分配
+                targets[idx] = float(info["low"])  # 占位；下面统一均分
                 busy_ids.append(idx)
 
         if busy_ids:
-            wsum = 0.0
-            w = {}
+            pool = leftover
+            alloc = {idx: 0.0 for idx in busy_ids}
+            pending = list(busy_ids)
+            while pending and pool > 0.0:
+                share = pool / len(pending)
+                next_pending = []
+                for idx in pending:
+                    info = self.gpu_info[idx]
+                    hi = info["max"] or info["default"] or leftover
+                    got = min(share, hi - alloc[idx])
+                    alloc[idx] += got
+                    pool -= got
+                    if alloc[idx] < hi - 0.5:
+                        next_pending.append(idx)
+                if len(next_pending) == len(pending):
+                    pool = 0.0  # 无人到顶但池未耗尽(浮点)，避免死循环
+                pending = next_pending
             for idx in busy_ids:
-                s = samples.get(idx) or {}
-                draw = s.get("power") if not s.get("na") else 0.0
-                draw = float(draw or 0.0)
-                w[idx] = max(draw, low)  # 权重下限=low，避免未知功耗的卡被饿死
-                wsum += w[idx]
-            for idx in busy_ids:
-                info = self.gpu_info[idx]
-                raw = (leftover * w[idx] / wsum) if wsum > 0 else leftover / len(busy_ids)
-                hi = info["max"] or info["default"] or leftover
-                targets[idx] = min(max(raw, low), hi)
+                targets[idx] = alloc[idx]
 
         # 取整到瓦，避免 nvidia-smi -pl 对非整数兼容问题
         targets = {k: int(round(v)) for k, v in targets.items()}
