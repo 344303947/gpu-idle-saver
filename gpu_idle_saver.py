@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GPU 空闲自动省电守护程序 v0.3.0
+GPU 空闲自动省电守护程序 v0.3.1
 
 用途：vLLM 多卡推理机。空闲时降低每张卡功耗上限省电；忙时恢复性能。
 安全约束：整机 GPU 功耗硬上限 = power_budget(默认 750W，电源1200W 预留450W给CPU等)。任意时刻
@@ -29,7 +29,7 @@ import tempfile
 import time
 import fcntl
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 STATE_BUSY = "busy"
 STATE_IDLE = "idle"
@@ -58,6 +58,11 @@ class GPUIdleSaver:
         # 本机电源额定 1200W，预留 450W 给 CPU/其他部件，故 GPU 预算 750W。
         self.power_budget = cfg.getfloat("power", "power_budget", fallback=750.0)
         self.power_low = cfg.getfloat("power", "power_low", fallback=100.0)
+        # 下发死区(W)：目标与当前生效值之差小于该值视为"微小调整"，受最短间隔抑制，
+        # 防止 ±几瓦的反复抖动每 2s 刷一次 nvidia-smi -pl；重大变化(差>=死区)立即下发。
+        self.deploy_deadband = cfg.getfloat("power", "deploy_deadband", fallback=10.0)
+        # 微小调整的最短下发间隔(秒)：抑制频繁下发；重大变化不受此限制。
+        self.deploy_min_interval = cfg.getfloat("power", "deploy_min_interval", fallback=10.0)
 
         try:
             self.gpu_ids = self._parse_gpu_ids(cfg.get("general", "gpu_ids", fallback="all"))
@@ -72,6 +77,7 @@ class GPUIdleSaver:
         self.idle_streak = {}
         self.busy_streak = {}
         self.deployed = {}      # 每卡当前已生效目标值(避免重复下发)
+        self.last_deploy_time = {}  # index -> 最近一次真正下发的时间戳(用于微小调整最短间隔)
         self.stop_flag = False
 
         self._lock_fd = self._acquire_lock()
@@ -372,19 +378,29 @@ class GPUIdleSaver:
         return targets
 
     def apply_limits(self, samples):
-        """按动态智能分配结果下发(仅下发变化值)。"""
+        """按动态智能分配结果下发（滞回 + 去抖）：
+        - 首次下发：立即执行；
+        - 差 < 死区(微小抖动)：一律不动，形成滞回窗口，彻底抑制 ±几瓦反复 -pl；
+        - 差 >= 死区(重大变化/忙闲迁移)：响应并受最短间隔节流，防止负载颤振每 2s 大跳。"""
         targets = self._build_targets(samples)
         n_busy = sum(1 for st in self.gpu_state.values() if st == STATE_BUSY)
+        now = time.time()
         changed = False
         for idx, t in targets.items():
             cur = self.deployed.get(idx)
-            if cur is None or abs(cur - t) > 0.5:
-                if self.dry_run:
-                    self.log("info", f"[dry-run] GPU{idx} 功耗上限 -> {t}W (活跃 {n_busy} 卡)")
-                else:
-                    self._set_power_limit(idx, t)
-                self.deployed[idx] = t
-                changed = True
+            if cur is None:
+                pass  # 首次下发：无条件执行
+            elif abs(cur - t) < self.deploy_deadband:
+                continue  # 微小调整：保持已下发值不动（滞回）
+            elif now - self.last_deploy_time.get(idx, 0.0) < self.deploy_min_interval:
+                continue  # 连续重大变化：受最短间隔节流，避免颤振高频大跳
+            if self.dry_run:
+                self.log("info", f"[dry-run] GPU{idx} 功耗上限 -> {t}W (活跃 {n_busy} 卡)")
+            else:
+                self._set_power_limit(idx, t)
+            self.deployed[idx] = t
+            self.last_deploy_time[idx] = now
+            changed = True
         if changed:
             summary = ", ".join(f"GPU{i}:{t}W" for i, t in sorted(targets.items()))
             self.log("info",
