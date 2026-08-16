@@ -282,8 +282,8 @@ sudo systemctl daemon-reload
 | v0.3.2 | **忙卡均分**：PP(流水线)推理适配——忙卡均分"预算−空闲占用"替代 power.draw 加权，消除"饱的饱饿的饿"正反馈与流水线短板；超物理上限 clamp 后剩余再分 |
 | v0.3.3 | **每卡功耗硬上限**：新增 `power_cap`(280W) 安全风控——动态分配/退出恢复任何场景单卡上限绝不超过该值 |
 | v0.3.4 | **档位表驱动分配**：忙卡统一按"忙卡数"查 `power_budget_by_active` 档位表(1/2忙250W、3忙200W、4忙185W)替代预算均分；`power_cap` 调整为主人指定的 250W；采样放缓至 5s/12次≈60s 判定空闲 |
-| v0.4.0 | **档位表驱动重构 + 固定分配新服务**：gpu_idle_saver 忙态分配全面走档位表；新增独立服务 `gpu-power-allocator/`(固定按卡量分配，60s 自愈纠偏)，见该目录 README/AGENTS-DEPLOY-NOTICE |
+| v0.4.0 | **档位表驱动重构 + 固定分配新服务**：gpu_idle_saver 忙态分配全面走档位表；新增独立服务 `gpu-power-service/`(固定按卡量分配，60s 自愈纠偏)，见该目录 README/AGENTS-DEPLOY-NOTICE |
 
 ---
 
-*文档对应版本：v0.4.0 · gpu-idle-saver 档位表驱动 + 新增 gpu-power-allocator 固定分配服务*
+*文档对应版本：v0.4.0 · gpu-idle-saver 档位表驱动 + 新增 gpu-power-service 固定分配服务*

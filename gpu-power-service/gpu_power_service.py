@@ -17,7 +17,7 @@ GPU 功率固定分配守护程序 v1.0.0
 固定分配语义：不区分空闲/忙碌去抖，直接按当前活跃卡数查表分配。
       活跃判定：利用率 > util_threshold(%) 或 功耗 > power_threshold(W)。
 
-运行：python3 gpu_power_allocator.py --config config.ini [--dry-run]
+运行：python3 gpu_power_service.py --config config.ini [--dry-run]
 """
 
 import argparse
@@ -76,16 +76,16 @@ class GPUAllocator:
 
     # ---------- 单实例锁 ----------
     def _acquire_lock(self):
-        lock_path = "/var/run/gpu-power-allocator.lock"
+        lock_path = "/var/run/gpu-power-service.lock"
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         except OSError:
-            lock_path = os.path.join(tempfile.gettempdir(), "gpu-power-allocator.lock")
+            lock_path = os.path.join(tempfile.gettempdir(), "gpu-power-service.lock")
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            self.log("error", "已有实例在运行(gpu-power-allocator)，拒绝启动")
+            self.log("error", "已有实例在运行(gpu-power-service)，拒绝启动")
             os._exit(1)
         self.log("info", f"单实例锁已获取: {lock_path}")
         return fd
@@ -342,7 +342,7 @@ class GPUAllocator:
 
     # ---------- 主循环 ----------
     def run(self):
-        self.log("info", f"GPU Power Allocator v{VERSION} (mode={self.allocation_mode}, dry_run={self.dry_run}, check_interval={self.check_interval}s)")
+        self.log("info", f"GPU Power Service v{VERSION} (mode={self.allocation_mode}, dry_run={self.dry_run}, check_interval={self.check_interval}s)")
         if self.allocation_mode == "active":
             self.log("info", f"活跃判定: util>{self.util_threshold}% 或 power>{self.power_threshold}W")
         self.log("info", f"固定分配档位表: {json.dumps({k: f'{v:.0f}W' for k, v in sorted(self.power_profile.items())})}")
