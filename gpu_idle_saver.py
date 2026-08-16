@@ -30,7 +30,7 @@ import tempfile
 import time
 import fcntl
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 
 STATE_BUSY = "busy"
 STATE_IDLE = "idle"
@@ -337,18 +337,22 @@ class GPUIdleSaver:
 
     # ---------- 动态智能功率分配 ----------
     def _build_targets(self, samples):
-        """整机预算内动态分配：空闲卡固定 power_low；忙卡【均分】"整机预算 − 空闲占用"。
-        适配 PP(流水线)推理：每卡同质负载、串联执行，瓶颈卡决定全链路吞吐，
-        用功耗加权的"按果配因"会喂饱饱饿饿、拖慢流水线；均分保证每卡上限一致。
-        超单卡物理上限的份额 clamp 到 hi，并把剩余预算再分给能接收的卡。
-        数学上保证: 所有卡上限之和 ≤ power_budget(默认750W)，绝不超整机 GPU 预算。"""
+        """按当前活跃(忙)卡数查档位表给忙卡分配功耗上限，空闲卡固定省电档。
+
+        powered by power_budget_by_active 档位表（当前 1/2忙:250W, 3忙:200W, 4忙:185W）：
+          - 空闲卡恒为 power_low(默认100W) 省电；
+          - 忙卡统一取"该忙卡数对应的档位"（每张忙卡一致，适配 PP 流水线同质负载）；
+          - 单卡档位 clamp 到每卡授权上限 max = min(硬件max, power_cap)；
+          - 保留整机硬校验：任何场景各卡上限之和 ≤ power_budget(750W)，绝不超整机 GPU 预算。
+        所有正常场景（含全空闲/1~4忙）总和均 ≤ 750W，档位表天然安全；校验仅作配置被
+        手工改坏时的兜底。"""
         n = len(self.gpu_info)
         if n == 0:
             return {}
         low = max((info["low"] for info in self.gpu_info.values()), default=self.power_low)
-        idle_total = sum(self.gpu_info[i]["low"] for i, st in self.gpu_state.items()
-                       if st == STATE_IDLE)
-        leftover = max(0.0, self.power_budget - idle_total)
+        n_busy = sum(1 for st in self.gpu_state.values() if st == STATE_BUSY)
+        # 忙卡统一档位：按忙卡数量查表（1->250, 2->250, 3->200, 4->185）
+        per = self.budget_for(n_busy)
 
         targets = {}
         busy_ids = []
@@ -356,29 +360,14 @@ class GPUIdleSaver:
             if self.gpu_state[idx] == STATE_IDLE:
                 targets[idx] = float(info["low"])
             else:
-                targets[idx] = float(info["low"])  # 占位；下面统一均分
+                targets[idx] = float(per)
                 busy_ids.append(idx)
 
-        if busy_ids:
-            pool = leftover
-            alloc = {idx: 0.0 for idx in busy_ids}
-            pending = list(busy_ids)
-            while pending and pool > 0.0:
-                share = pool / len(pending)
-                next_pending = []
-                for idx in pending:
-                    info = self.gpu_info[idx]
-                    hi = info["max"] or info["default"] or leftover
-                    got = min(share, hi - alloc[idx])
-                    alloc[idx] += got
-                    pool -= got
-                    if alloc[idx] < hi - 0.5:
-                        next_pending.append(idx)
-                if len(next_pending) == len(pending):
-                    pool = 0.0  # 无人到顶但池未耗尽(浮点)，避免死循环
-                pending = next_pending
-            for idx in busy_ids:
-                targets[idx] = alloc[idx]
+        # 单卡档位 clamp 到每卡授权上限 max (min(硬件max, power_cap))
+        for idx in busy_ids:
+            hi = self.gpu_info[idx]["max"]
+            if hi and hi > 0:
+                targets[idx] = min(targets[idx], float(hi))
 
         # 取整到瓦，避免 nvidia-smi -pl 对非整数兼容问题
         targets = {k: int(round(v)) for k, v in targets.items()}

@@ -1,0 +1,21 @@
+[Unit]
+Description=GPU 功率固定分配守护程序 (Power Allocator)
+Documentation=https://nvidia.com
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/gpu-power-allocator/gpu_power_allocator.py --config /opt/gpu-power-allocator/config.ini
+WorkingDirectory=/opt/gpu-power-allocator
+Restart=on-failure
+RestartSec=5
+# 退出信号：程序捕捉 SIGTERM 并恢复默认功耗
+KillSignal=SIGTERM
+TimeoutStopSec=60
+# 日志进 journalctl -u gpu-power-allocator
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

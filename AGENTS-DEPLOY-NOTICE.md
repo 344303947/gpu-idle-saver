@@ -18,3 +18,10 @@
 
 ## 相关配置文件
 - /etc/systemd/system/gpu-idle-saver.service   （服务 unit，也请保持与仓库内一致）
+
+## 新服务：gpu-power-allocator（固定功率分配，已在生产机替换 gpu-idle-saver）
+- 代码源：仓库子目录 `gpu-power-allocator/`（gpu_power_allocator.py + config.ini + systemd unit）
+- 部署目录：/opt/gpu-power-allocator/
+- 见 gpu-power-allocator/AGENTS-DEPLOY-NOTICE.md 的安装/配置/自愈验证说明
+- 生产机现状：gpu-idle-saver 已 disabled，gpu-power-allocator 已 enabled + running
+- 重要：两台服务都有 `nvidia-smi -pl` 写权限，**不可同时启用**，二选一
